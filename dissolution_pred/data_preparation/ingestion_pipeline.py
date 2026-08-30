@@ -1,6 +1,6 @@
 import pandas as pd
 
-from utils.ingestion_helpers import (
+from dissolution_pred.utils.ingestion_helpers import (
     impute_small_gaps,
     merge_batch_and_lab,
     merge_sensor_and_batch,
@@ -10,7 +10,7 @@ from utils.ingestion_helpers import (
 )
 
 
-def data_ingestion_pipeline(
+def data_embedding_pipeline(
     batch_df: pd.DataFrame,
     sensor_df: pd.DataFrame,
     lab_df: pd.DataFrame,
@@ -29,11 +29,11 @@ def data_ingestion_pipeline(
     """
 
     sensor_df = timestamp_sanity_check(sensor_df, frequency=frequency)
-    sensor_df = outlier_removal(sensor_df)
-    sensor_df = impute_small_gaps(sensor_df)
     sensor_df = offset_correction(sensor_df, offset_df)
+    #sensor_df = outlier_removal(sensor_df)
+    sensor_df = impute_small_gaps(sensor_df)
     batch_lab_merged = merge_batch_and_lab(batch_df, lab_df)
-    batch_sensor_merged = merge_sensor_and_batch(batch_lab_merged, sensor_df)
+    batch_sensor_merged = merge_sensor_and_batch(batch_df, sensor_df)
 
     return batch_lab_merged, batch_sensor_merged
 

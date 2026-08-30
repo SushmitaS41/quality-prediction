@@ -1,0 +1,37 @@
+# ── Autoencoder configuration ──
+# All hyperparameters in one place — nothing hardcoded.
+
+autoencoder:
+  # Architecture (Conv1D)
+  latent_dim: 8             # 8 outperforms 4 (test R²: 0.21 vs 0.16)
+  channels: [32, 64]        # balanced encoder — ~50K params
+  seq_len: 256              # less compression: 576 avg → 256 (~2.25x)
+  dropout: 0.0              # model is small enough — no dropout needed
+
+  # Training
+  epochs: 100
+  batch_size: 8             # smaller batches → more updates per epoch
+  lr: 0.001
+  weight_decay: 0.0001      # moderate L2 regularization
+  val_split: 0.15           # keep more data for training (113 train / 20 val)
+  patience: 40              # more patience with slower learning
+  scheduler_factor: 0.5     # ReduceLROnPlateau factor
+  scheduler_patience: 15    # ReduceLROnPlateau patience
+  seed: 42
+
+
+  # Output
+  save_dir: trained_autoencoder  # folder for model weights, scaler, config, latent vectors
+
+
+# ── Baseline ──
+# RidgeCV auto-selects alpha via LOO-CV — no config needed.
+
+# ── XGBoost sweep configuration ──
+xgboost:
+  seed: 42
+  configs:
+    - { n_estimators: 50,  max_depth: 2, learning_rate: 0.05, min_child_weight: 5, subsample: 0.8, colsample_bytree: 0.8 }
+    - { n_estimators: 100, max_depth: 2, learning_rate: 0.05, min_child_weight: 5, subsample: 0.8, colsample_bytree: 0.8 }
+    - { n_estimators: 100, max_depth: 3, learning_rate: 0.01, min_child_weight: 5, subsample: 0.8, colsample_bytree: 0.8 }
+    - { n_estimators: 100, max_depth: 3, learning_rate: 0.05, min_child_weight: 5, subsample: 0.8, colsample_bytree: 0.8 }

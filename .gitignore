@@ -1,0 +1,6 @@
+*__pycache__*
+*.pyc
+*.ipynb
+trained_autoencoder
+plots
+*.csv
