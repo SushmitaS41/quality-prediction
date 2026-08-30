@@ -87,129 +87,177 @@ def timestamp_sanity_check(
 
 
 def outlier_removal(sensor_df: pd.DataFrame) -> pd.DataFrame:
-    """Remove outlier rows per sensor Tag using Isolation Forest.
+    """Remove outlier values using Isolation Forest.
 
-    Notes:
-    - Uses `Value` as the model feature (after numeric coercion).
-    - Fits one model per `Tag`.
-    - Keeps `NaN` values in `Value` (for downstream imputation).
-    - Skips model fitting for very small Tag groups.
+    Supports two formats:
+    - Long format: columns `Tag`, `Value` (fits one model per Tag, removes outlier rows).
+    - Wide/pivoted format: columns `fpbatch`, `timestamp`, <sensor1>, <sensor2>, ...
+      (fits one model per sensor column, replaces outliers with NaN).
     """
 
-    required_cols = {"Tag", "Value"}
-    missing_cols = required_cols - set(sensor_df.columns)
-    if missing_cols:
-        raise KeyError(
-            f"sensor_df is missing required columns: {sorted(missing_cols)}"
-        )
+    is_long = {"Tag", "Value"}.issubset(sensor_df.columns)
 
     contamination = 0.03
     min_points = 10
 
-    df = sensor_df.copy()
-    df["Value"] = pd.to_numeric(df["Value"], errors="coerce")
+    if is_long:
+        df = sensor_df.copy()
+        df["Value"] = pd.to_numeric(df["Value"], errors="coerce")
 
-    keep_mask = pd.Series(True, index=df.index)
+        keep_mask = pd.Series(True, index=df.index)
 
-    for _tag, idx in df.groupby("Tag", dropna=False).groups.items():
-        grp = df.loc[idx, ["Value"]]
-        valid_idx = grp["Value"].dropna().index
+        for _tag, idx in df.groupby("Tag", dropna=False).groups.items():
+            grp = df.loc[idx, ["Value"]]
+            valid_idx = grp["Value"].dropna().index
 
-        # IsolationForest needs enough points to build a stable model.
-        if len(valid_idx) < min_points:
-            continue
+            if len(valid_idx) < min_points:
+                continue
 
-        model = IsolationForest(
-            contamination=contamination,
-            random_state=42,
-            n_estimators=200,
-        )
-        pred = model.fit_predict(df.loc[valid_idx, ["Value"]])
-        inlier_idx = valid_idx[pred == 1]
+            model = IsolationForest(
+                contamination=contamination,
+                random_state=42,
+                n_estimators=200,
+            )
+            pred = model.fit_predict(df.loc[valid_idx, ["Value"]])
+            inlier_idx = valid_idx[pred == 1]
 
-        # Keep all NaN Value rows; remove only detected outlier rows.
-        grp_values = df.loc[idx, "Value"]
-        grp_keep = grp_values.isna() | grp_values.index.isin(inlier_idx)
-        keep_mask.loc[idx] = grp_keep
+            grp_values = df.loc[idx, "Value"]
+            grp_keep = grp_values.isna() | grp_values.index.isin(inlier_idx)
+            keep_mask.loc[idx] = grp_keep
 
-    cleaned_df = df.loc[keep_mask].copy()
+        cleaned_df = df.loc[keep_mask].copy()
 
-    sort_cols = [c for c in ["Tag", "Timestamp"] if c in cleaned_df.columns]
-    if sort_cols:
-        cleaned_df = cleaned_df.sort_values(sort_cols).reset_index(drop=True)
+        sort_cols = [c for c in ["Tag", "Timestamp"] if c in cleaned_df.columns]
+        if sort_cols:
+            cleaned_df = cleaned_df.sort_values(sort_cols).reset_index(drop=True)
+        else:
+            cleaned_df = cleaned_df.reset_index(drop=True)
+
+        return cleaned_df
+
     else:
-        cleaned_df = cleaned_df.reset_index(drop=True)
+        df = sensor_df.copy()
+        meta_cols = [c for c in ["fpbatch", "timestamp"] if c in df.columns]
+        tag_cols = [c for c in df.columns if c not in meta_cols]
 
-    return cleaned_df
+        for col in tag_cols:
+            series = pd.to_numeric(df[col], errors="coerce")
+            valid_idx = series.dropna().index
+
+            if len(valid_idx) < min_points:
+                continue
+
+            model = IsolationForest(
+                contamination=contamination,
+                random_state=42,
+                n_estimators=200,
+            )
+            pred = model.fit_predict(series.loc[valid_idx].values.reshape(-1, 1))
+            outlier_idx = valid_idx[pred == -1]
+            df.loc[outlier_idx, col] = np.nan
+
+        return df
 
 
 def impute_small_gaps(sensor_df: pd.DataFrame) -> pd.DataFrame:
-    """Linearly interpolate internal `Value` gaps shorter than 60 minutes.
+    """Linearly interpolate internal gaps shorter than 60 minutes.
 
-    Assumptions:
-    - Data is grouped by `Tag` and ordered on a regular timestamp grid.
-    - Only the `Value` column is imputed.
-    - Edge gaps are not filled because interpolation is limited to interior gaps.
-    - Adds `is_imputed_upto1h` to mark rows filled by interpolation.
+    Supports two formats:
+    - Long format: columns `Tag`, `Timestamp`, `Value`.
+    - Wide/pivoted format: columns `fpbatch`, `timestamp`, <sensor1>, <sensor2>, ...
+      (interpolates each sensor column per fpbatch).
     """
 
-    required_cols = {"Tag", "Timestamp", "Value"}
-    missing_cols = required_cols - set(sensor_df.columns)
-    if missing_cols:
-        raise KeyError(
-            f"sensor_df is missing required columns: {sorted(missing_cols)}"
-        )
-
-    df = sensor_df.copy()
-    df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors="coerce")
-    df["Value"] = pd.to_numeric(df["Value"], errors="coerce")
-    df = df.sort_values(["Tag", "Timestamp"]).reset_index(drop=True)
-    df["is_imputed_upto1h"] = False
+    is_long = {"Tag", "Timestamp", "Value"}.issubset(sensor_df.columns)
 
     max_gap = pd.Timedelta(minutes=60)
-    imputed_groups: list[pd.DataFrame] = []
 
-    for _tag, grp in df.groupby("Tag", sort=False):
-        grp = grp.sort_values("Timestamp").copy()
-        positive_diffs = grp["Timestamp"].diff().dropna()
-        positive_diffs = positive_diffs[positive_diffs > pd.Timedelta(0)]
+    if is_long:
+        df = sensor_df.copy()
+        df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors="coerce")
+        df["Value"] = pd.to_numeric(df["Value"], errors="coerce")
+        df = df.sort_values(["Tag", "Timestamp"]).reset_index(drop=True)
+        df["is_imputed_upto1h"] = False
 
-        if positive_diffs.empty:
+        imputed_groups: list[pd.DataFrame] = []
+
+        for _tag, grp in df.groupby("Tag", sort=False):
+            grp = grp.sort_values("Timestamp").copy()
+            positive_diffs = grp["Timestamp"].diff().dropna()
+            positive_diffs = positive_diffs[positive_diffs > pd.Timedelta(0)]
+
+            if positive_diffs.empty:
+                imputed_groups.append(grp)
+                continue
+
+            cadence = positive_diffs.mode().iloc[0]
+            if cadence <= pd.Timedelta(0):
+                imputed_groups.append(grp)
+                continue
+
+            interpolated = grp["Value"].interpolate(method="linear", limit_area="inside")
+            is_missing = grp["Value"].isna()
+
+            if not is_missing.any():
+                imputed_groups.append(grp)
+                continue
+
+            run_ids = (is_missing != is_missing.shift(fill_value=False)).cumsum()
+
+            for run_id in run_ids[is_missing].unique():
+                run_mask = run_ids == run_id
+                run_positions = grp.index[run_mask]
+                run_length = len(run_positions)
+                gap_duration = run_length * cadence
+
+                left_pos = run_positions.min() - 1
+                right_pos = run_positions.max() + 1
+                has_left_value = left_pos in grp.index and pd.notna(grp.loc[left_pos, "Value"])
+                has_right_value = right_pos in grp.index and pd.notna(grp.loc[right_pos, "Value"])
+
+                if gap_duration < max_gap and has_left_value and has_right_value:
+                    grp.loc[run_mask, "Value"] = interpolated.loc[run_mask]
+                    grp.loc[run_mask, "is_imputed_upto1h"] = grp.loc[run_mask, "Value"].notna()
+
             imputed_groups.append(grp)
-            continue
 
-        cadence = positive_diffs.mode().iloc[0]
-        if cadence <= pd.Timedelta(0):
+        return pd.concat(imputed_groups, ignore_index=True)
+
+    else:
+        df = sensor_df.copy()
+        time_col = "timestamp" if "timestamp" in df.columns else "Timestamp"
+        df[time_col] = pd.to_datetime(df[time_col], errors="coerce")
+
+        meta_cols = [c for c in ["fpbatch", time_col] if c in df.columns]
+        tag_cols = [c for c in df.columns if c not in meta_cols]
+
+        imputed_groups: list[pd.DataFrame] = []
+
+        for _batch, grp in df.groupby("fpbatch", sort=False):
+            grp = grp.sort_values(time_col).copy()
+            positive_diffs = grp[time_col].diff().dropna()
+            positive_diffs = positive_diffs[positive_diffs > pd.Timedelta(0)]
+
+            if positive_diffs.empty:
+                imputed_groups.append(grp)
+                continue
+
+            cadence = positive_diffs.mode().iloc[0]
+            if cadence <= pd.Timedelta(0):
+                imputed_groups.append(grp)
+                continue
+
+            max_limit = int(max_gap / cadence)
+
+            for col in tag_cols:
+                grp[col] = pd.to_numeric(grp[col], errors="coerce")
+                grp[col] = grp[col].interpolate(
+                    method="linear", limit=max_limit, limit_area="inside"
+                )
+
             imputed_groups.append(grp)
-            continue
 
-        interpolated = grp["Value"].interpolate(method="linear", limit_area="inside")
-        is_missing = grp["Value"].isna()
-
-        if not is_missing.any():
-            imputed_groups.append(grp)
-            continue
-
-        run_ids = (is_missing != is_missing.shift(fill_value=False)).cumsum()
-
-        for run_id in run_ids[is_missing].unique():
-            run_mask = run_ids == run_id
-            run_positions = grp.index[run_mask]
-            run_length = len(run_positions)
-            gap_duration = run_length * cadence
-
-            left_pos = run_positions.min() - 1
-            right_pos = run_positions.max() + 1
-            has_left_value = left_pos in grp.index and pd.notna(grp.loc[left_pos, "Value"])
-            has_right_value = right_pos in grp.index and pd.notna(grp.loc[right_pos, "Value"])
-
-            if gap_duration < max_gap and has_left_value and has_right_value:
-                grp.loc[run_mask, "Value"] = interpolated.loc[run_mask]
-                grp.loc[run_mask, "is_imputed_upto1h"] = grp.loc[run_mask, "Value"].notna()
-
-        imputed_groups.append(grp)
-
-    return pd.concat(imputed_groups, ignore_index=True)
+        return pd.concat(imputed_groups, ignore_index=True)
 
 
 def offset_correction(sensor_df: pd.DataFrame, offset_df: pd.DataFrame) -> pd.DataFrame:
@@ -351,20 +399,24 @@ def merge_batch_and_lab(batch_df: pd.DataFrame, lab_df: pd.DataFrame, output_pat
 def merge_sensor_and_batch(
     batch_df: pd.DataFrame,
     sensor_df: pd.DataFrame,
+    offset_df: pd.DataFrame | None = None,
     output_path: str | None = None,
 ) -> pd.DataFrame:
     """Build a dataset linking each fpbatch to sensor readings within its time window.
 
-    For each unique batch in batch_df, slices sensor rows where:
-        starttime < timestamp < endtime
-    and pivots so each unique Tag becomes its own column.
+    For each unique batch, shifts the batch window per tag using offset_df
+    (so sensor timestamps stay on the original 1-minute grid), then pivots
+    so each unique Tag becomes its own column.
 
     Parameters
     ----------
     batch_df : pd.DataFrame
         Must contain columns: `fpbatch`, `starttime`, `endtime`.
     sensor_df : pd.DataFrame
-        Must contain columns: `Tag`, `Value`, and either `Timestamp_Adjusted` or `Timestamp`.
+        Must contain columns: `Tag`, `Value`, `Timestamp`.
+    offset_df : pd.DataFrame, optional
+        Columns: `Tag_Names_in_Software`, `Offset_Timings_in_seconds`.
+        If provided, adjusts batch windows per tag instead of shifting sensor timestamps.
     output_path : str, optional
         If provided, saves the result as a CSV to this path.
 
@@ -388,10 +440,27 @@ def merge_sensor_and_batch(
     batch["starttime"] = pd.to_datetime(batch["starttime"], errors="coerce")
     batch["endtime"] = pd.to_datetime(batch["endtime"], errors="coerce")
 
-    time_col = "Timestamp_Adjusted" if "Timestamp_Adjusted" in sensor_df.columns else "Timestamp"
     sensor = sensor_df.copy()
-    sensor[time_col] = pd.to_datetime(sensor[time_col], errors="coerce")
+    sensor["Timestamp"] = pd.to_datetime(sensor["Timestamp"], errors="coerce")
     sensor["Value"] = pd.to_numeric(sensor["Value"], errors="coerce")
+
+    # Build offset map (tag -> seconds) if offset_df is provided
+    offset_map: dict[str, float] = {}
+    if offset_df is not None and not offset_df.empty:
+        req = {"Tag_Names_in_Software", "Offset_Timings_in_seconds"}
+        if req.issubset(offset_df.columns):
+            off = offset_df[["Tag_Names_in_Software", "Offset_Timings_in_seconds"]].copy()
+            off["Offset_Timings_in_seconds"] = pd.to_numeric(off["Offset_Timings_in_seconds"], errors="coerce")
+            offset_map = dict(zip(off["Tag_Names_in_Software"], off["Offset_Timings_in_seconds"]))
+
+    all_tags = sensor["Tag"].dropna().unique()
+
+    # Pre-group sensor by Tag once — avoids repeated full-DataFrame scans
+    sensor_by_tag: dict[str, pd.DataFrame] = {}
+    for tag in all_tags:
+        tag_df = sensor.loc[sensor["Tag"] == tag, ["Timestamp", "Value"]].copy()
+        tag_df = tag_df.set_index("Timestamp").sort_index()
+        sensor_by_tag[tag] = tag_df
 
     results = []
 
@@ -403,25 +472,35 @@ def merge_sensor_and_batch(
         if pd.isna(start) or pd.isna(end):
             continue
 
-        mask = (sensor[time_col] > start) & (sensor[time_col] < end)
-        slice_df = sensor.loc[mask, ["Tag", time_col, "Value"]].copy()
+        tag_slices = []
+        for tag in all_tags:
+            tag_df = sensor_by_tag[tag]
+            offset_s = offset_map.get(tag, 0.0)
+            if pd.isna(offset_s):
+                offset_s = 0.0
+            adj_start = start + pd.Timedelta(seconds=offset_s)
+            adj_end = end + pd.Timedelta(seconds=offset_s)
 
-        if slice_df.empty:
+            # Fast slice on sorted DatetimeIndex (strict inequality: > start, < end)
+            slc = tag_df[(tag_df.index > adj_start) & (tag_df.index < adj_end)]
+            if slc.empty:
+                continue
+            slc = slc.rename(columns={"Value": tag})
+            tag_slices.append(slc)
+
+        if not tag_slices:
             continue
 
-        # Pivot so each Tag becomes its own column
-        pivoted = slice_df.pivot_table(
-            index=time_col,
-            columns="Tag",
-            values="Value",
-            aggfunc="mean",
-        )
-        pivoted.index.name = "timestamp"
-        pivoted.columns.name = None
-        pivoted = pivoted.reset_index()
-        pivoted["fpbatch"] = fpbatch
+        # Join all tags on the shared Timestamp index (1-minute grid)
+        # Use inner join so only timestamps present for ALL tags are kept — no edge NaNs
+        merged = tag_slices[0]
+        for ts in tag_slices[1:]:
+            merged = merged.join(ts, how="inner")
 
-        results.append(pivoted)
+        merged.index.name = "timestamp"
+        merged = merged.reset_index()
+        merged["fpbatch"] = fpbatch
+        results.append(merged)
 
     if not results:
         return pd.DataFrame(columns=["fpbatch", "timestamp"])
