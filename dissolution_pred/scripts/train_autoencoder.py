@@ -58,8 +58,8 @@ def parse_args():
         help="Drop columns with NaN fraction above this (default: 0.90)",
     )
     parser.add_argument(
-        "--save-dir", type=str, default="trained_autoencoder",
-        help="Directory to save autoencoder artifacts (default: trained_autoencoder)",
+        "--save-dir", type=str, default="trained_artifacts",
+        help="Directory to save autoencoder artifacts (default: trained_artifacts)",
     )
     return parser.parse_args()
 

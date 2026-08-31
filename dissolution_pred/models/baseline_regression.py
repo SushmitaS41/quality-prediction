@@ -50,4 +50,4 @@ def train_baseline(
     print(f"  Train — MAE: {train_metrics['MAE']:.4f}  R²: {train_metrics['R2']:.4f}")
     print(f"  Test  — MAE: {test_metrics['MAE']:.4f}  R²: {test_metrics['R2']:.4f}")
 
-    return results, model
+    return results, model, scaler

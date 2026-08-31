@@ -5,6 +5,8 @@ Produces:
     batch_lab_merged         (lab data for target extraction)
 """
 
+import os
+
 import numpy as np
 import pandas as pd
 
@@ -25,9 +27,6 @@ def run_ingestion(
     batch_lab_merged, batch_sensor_merged = data_embedding_pipeline(
         batch_df, sensor_df, lab_df, offset_df, frequency=frequency,
     )
-    print(f"Ingestion complete:")
-    print(f"  batch_lab_merged:    {batch_lab_merged.shape}")
-    print(f"  batch_sensor_merged: {batch_sensor_merged.shape}")
     return batch_lab_merged, batch_sensor_merged
 
 
@@ -62,10 +61,17 @@ def sanity_check_and_clean(
 def chronological_split(
     batch_sensor_clean: pd.DataFrame,
     train_frac: float = 0.60,
-) -> tuple[pd.DataFrame, pd.DataFrame, list, list]:
-    """Sort by timestamp, split batches chronologically.
+    val_frac: float = 0.20,
+    save_dir: str | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, list, list, list]:
+    """Sort by timestamp, split batches chronologically into train/val/test.
 
-    Returns (train_df, test_df, train_batches, test_batches).
+    Works on a copy to perform the split, saves the three splits as CSVs
+    in a ``data_source`` folder, and returns the original with train and
+    test batches removed (i.e. only validation rows remain).
+
+    Returns (remaining_df, train_df, val_df, test_df,
+             train_batches, val_batches, test_batches).
     """
     df = batch_sensor_clean.copy()
     df["timestamp"] = pd.to_datetime(df["timestamp"])
@@ -80,40 +86,68 @@ def chronological_split(
 
     n = len(batch_order)
     n_train = int(n * train_frac)
+    n_val = int(n * val_frac)
 
     train_batches = batch_order[:n_train]
-    test_batches = batch_order[n_train:]
+    val_batches = batch_order[n_train:n_train + n_val]
+    test_batches = batch_order[n_train + n_val:]
 
     train_df = df[df["fpbatch"].isin(train_batches)].reset_index(drop=True)
+    val_df = df[df["fpbatch"].isin(val_batches)].reset_index(drop=True)
     test_df = df[df["fpbatch"].isin(test_batches)].reset_index(drop=True)
 
-    print(f"Chronological {train_frac:.0%}/{1-train_frac:.0%} split:")
+    # ── Save splits to data_source folder ──
+    if save_dir is None:
+        save_dir = os.path.join(
+            os.path.dirname(__file__), "..", "..", "data_source",
+        )
+    os.makedirs(save_dir, exist_ok=True)
+
+    train_df.to_csv(os.path.join(save_dir, "batch_sensor_train.csv"), index=False)
+    val_df.to_csv(os.path.join(save_dir, "batch_sensor_val.csv"), index=False)
+    test_df.to_csv(os.path.join(save_dir, "batch_sensor_test.csv"), index=False)
+    print(f"Saved splits to {os.path.abspath(save_dir)}/")
+
+    # ── Remove train and test from the original ──
+    remaining_df = batch_sensor_clean[
+        ~batch_sensor_clean["fpbatch"].isin(train_batches + test_batches)
+    ].reset_index(drop=True)
+
+    test_frac = 1 - train_frac - val_frac
+    print(f"Chronological {train_frac:.0%}/{val_frac:.0%}/{test_frac:.0%} split:")
     print(f"  Train: {len(train_batches)} batches  ({len(train_df)} rows)  "
           f"{train_df['timestamp'].min()} → {train_df['timestamp'].max()}")
+    print(f"  Val:   {len(val_batches)} batches  ({len(val_df)} rows)  "
+          f"{val_df['timestamp'].min()} → {val_df['timestamp'].max()}")
     print(f"  Test:  {len(test_batches)} batches  ({len(test_df)} rows)  "
           f"{test_df['timestamp'].min()} → {test_df['timestamp'].max()}")
-    return train_df, test_df, train_batches, test_batches
+    print(f"  Remaining (original − train − test): {remaining_df['fpbatch'].nunique()} batches  "
+          f"({len(remaining_df)} rows)")
+
+    return remaining_df, train_df, val_df, test_df, train_batches, val_batches, test_batches
 
 
 def extract_target(
     batch_lab_merged: pd.DataFrame,
     target_variable: str = "FilteredArea1",
 ) -> pd.DataFrame:
-    """Extract the target column from lab data: mean value per batch.
+    """Extract target rows from lab data, keeping all lane × time combinations.
 
-    Averages across all lanes and time points for the given variable.
-    Returns DataFrame with columns [fpbatch, target].
+    Returns DataFrame with columns [fpbatch, lane, time, target] —
+    one row per (fpbatch, lane, time) measurement.
     """
     lab = batch_lab_merged.copy()
     lab["value"] = pd.to_numeric(lab["value"], errors="coerce")
-    sub = lab[lab["variable"] == target_variable]
+    sub = lab[lab["variable"] == target_variable].copy()
+    sub = sub.dropna(subset=["value"])
     target = (
-        sub.groupby("fpbatch")["value"]
-        .mean()
-        .reset_index()
+        sub[["fpbatch", "lane", "time", "value"]]
         .rename(columns={"value": "target"})
+        .reset_index(drop=True)
     )
-    print(f"Target '{target_variable}': {len(target)} batches with values")
+    print(f"Target '{target_variable}': {len(target)} rows across "
+          f"{target['fpbatch'].nunique()} batches "
+          f"({target['time'].nunique()} time points, {target['lane'].nunique()} lanes)")
     return target
 
 
@@ -145,8 +179,8 @@ def prepare_data(
     )
 
     print()
-    train_df, test_df, train_batches, test_batches = chronological_split(
-        batch_sensor_clean, train_frac,
+    remaining_df, train_df, val_df, test_df, train_batches, val_batches, test_batches = (
+        chronological_split(batch_sensor_clean, train_frac)
     )
 
     print()
@@ -157,9 +191,12 @@ def prepare_data(
     return {
         "batch_lab_merged": batch_lab_merged,
         "batch_sensor_clean": batch_sensor_clean,
+        "remaining_df": remaining_df,
         "train_df": train_df,
+        "val_df": val_df,
         "test_df": test_df,
         "train_batches": train_batches,
+        "val_batches": val_batches,
         "test_batches": test_batches,
         "target_df": target_df,
     }

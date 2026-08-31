@@ -1,0 +1,15 @@
+{
+  "colsample_bytree": 0.7,
+  "learning_rate": 0.03,
+  "max_depth": 3,
+  "min_child_weight": 5,
+  "n_estimators": 300,
+  "random_state": 42,
+  "subsample": 0.8,
+  "target_transform": "log1p",
+  "feature_set": "combined (latent + stats)",
+  "val_R2": 0.34436506369699216,
+  "test_R2": -0.11453237107507985,
+  "test_MAE": 2.5597708358391222,
+  "test_RMSE": 5.2730445949206075
+}

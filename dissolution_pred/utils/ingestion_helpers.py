@@ -79,9 +79,9 @@ def timestamp_sanity_check(
 def outlier_removal(
     sensor_df: pd.DataFrame,
     contamination: float = 0.03,
-    min_points: int = 30,
+    min_points: int = 20,
 ) -> pd.DataFrame:
-    """Remove outlier values using Isolation Forest per tag.
+    """Flag and NaN outlier values using Isolation Forest per tag.
 
     Parameters
     ----------
@@ -91,6 +91,13 @@ def outlier_removal(
         Expected proportion of outliers (default 0.03).
     min_points : int
         Minimum valid observations per tag to run IF.
+
+    Returns
+    -------
+    pd.DataFrame
+        Same rows as input with added columns:
+        - ``is_outlier``: True for detected outliers.
+        - ``Value_if_clean``: Value with outliers replaced by NaN.
     """
 
     if not {"Tag", "Value"}.issubset(sensor_df.columns):
@@ -103,7 +110,8 @@ def outlier_removal(
         df["Timestamp"] = pd.to_datetime(df["Timestamp"], errors="coerce")
         df = df.sort_values(["Tag", "Timestamp"]).reset_index(drop=True)
 
-    keep_mask = pd.Series(True, index=df.index)
+    df["is_outlier"] = False
+    df["Value_if_clean"] = df["Value"]
 
     for _tag, idx in df.groupby("Tag", dropna=False).groups.items():
         values = df.loc[idx, "Value"]
@@ -113,20 +121,24 @@ def outlier_removal(
         if len(valid_values) < min_points:
             continue
 
-        iso = IsolationForest(contamination=contamination, random_state=42)
+        iso = IsolationForest(
+            contamination=contamination,
+            random_state=42,
+            n_estimators=200,
+        )
         preds = iso.fit_predict(valid_values.values.reshape(-1, 1))
-        outlier_mask = preds == -1
-        keep_mask.loc[valid_values.index[outlier_mask]] = False
+        outlier_idx = valid_values.index[preds == -1]
 
-    cleaned_df = df.loc[keep_mask].copy()
+        df.loc[outlier_idx, "is_outlier"] = True
+        df.loc[outlier_idx, "Value_if_clean"] = pd.NA
 
-    sort_cols = [c for c in ["Tag", "Timestamp"] if c in cleaned_df.columns]
+    sort_cols = [c for c in ["Tag", "Timestamp"] if c in df.columns]
     if sort_cols:
-        cleaned_df = cleaned_df.sort_values(sort_cols).reset_index(drop=True)
+        df = df.sort_values(sort_cols).reset_index(drop=True)
     else:
-        cleaned_df = cleaned_df.reset_index(drop=True)
+        df = df.reset_index(drop=True)
 
-    return cleaned_df
+    return df
 
 
 def impute_small_gaps(sensor_df: pd.DataFrame) -> pd.DataFrame:

@@ -84,4 +84,4 @@ def train_xgboost_sweep(
     print(f"\nTop 10 features (best model, val R²={best_val_r2:.4f}):")
     print(importance_df.head(10).to_string(index=False))
 
-    return results_df, importance_df
+    return results_df, importance_df, best_model

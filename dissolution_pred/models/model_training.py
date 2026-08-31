@@ -5,6 +5,7 @@ Two models only:
     2. XGBoost (config-driven sweep)
 """
 
+import joblib
 import numpy as np
 import pandas as pd
 import yaml
@@ -30,12 +31,14 @@ def train_models(
     xy_stats: dict,
     xy_latent: dict,
     config_path: str | None = None,
+    save_dir: str = "trained_artifacts",
 ) -> dict:
     """Full Part 3 pipeline.
 
     - Baseline (RidgeCV): trained on sensor summary stats
     - XGBoost: trained on autoencoder latent variables
 
+    Saves the best model, scaler, and results to *save_dir*.
     Returns dict with results DataFrames and importance.
     """
     print("=" * 60)
@@ -47,7 +50,7 @@ def train_models(
 
     # --- Baseline: RidgeCV on sensor stats ---
     print("\n--- RidgeCV (sensor stats) ---")
-    baseline_results, baseline_model = train_baseline(
+    baseline_results, baseline_model, baseline_scaler = train_baseline(
         xy_stats["X_train"].values, xy_stats["y_train"],
         xy_stats["X_test"].values, xy_stats["y_test"],
     )
@@ -55,7 +58,7 @@ def train_models(
 
     # --- RidgeCV on latent variables ---
     print("\n--- RidgeCV (latent variables) ---")
-    latent_ridge_results, _ = train_baseline(
+    latent_ridge_results, latent_ridge_model, latent_ridge_scaler = train_baseline(
         xy_latent["X_train"].values, xy_latent["y_train"],
         xy_latent["X_test"].values, xy_latent["y_test"],
     )
@@ -73,7 +76,7 @@ def train_models(
     tr_idx, vl_idx = next(kf.split(X_tr))
 
     print("\n--- XGBoost (on latent variables) ---")
-    xgb_results, importance_df = train_xgboost_sweep(
+    xgb_results, importance_df, best_xgb_model = train_xgboost_sweep(
         X_tr[tr_idx], y_tr[tr_idx],
         X_tr[vl_idx], y_tr[vl_idx],
         X_te, y_te,
@@ -90,6 +93,24 @@ def train_models(
 
     best = combined.iloc[0]
     print(f"\nBest model: {best['model']} (test R²={best['test_R2']:.4f})")
+
+    # ── Save all trained artifacts ──
+    os.makedirs(save_dir, exist_ok=True)
+
+    joblib.dump(best_xgb_model, os.path.join(save_dir, "best_xgboost.pkl"))
+    joblib.dump(baseline_model, os.path.join(save_dir, "ridge_stats.pkl"))
+    joblib.dump(baseline_scaler, os.path.join(save_dir, "ridge_stats_scaler.pkl"))
+    joblib.dump(latent_ridge_model, os.path.join(save_dir, "ridge_latent.pkl"))
+    joblib.dump(latent_ridge_scaler, os.path.join(save_dir, "ridge_latent_scaler.pkl"))
+    combined.to_csv(os.path.join(save_dir, "model_results.csv"), index=False)
+    importance_df.to_csv(os.path.join(save_dir, "feature_importance.csv"), index=False)
+
+    print(f"\nTrained model artifacts saved to {os.path.abspath(save_dir)}/")
+    for fname in sorted(os.listdir(save_dir)):
+        fpath = os.path.join(save_dir, fname)
+        if os.path.isfile(fpath):
+            size_kb = os.path.getsize(fpath) / 1024
+            print(f"  {fname} ({size_kb:.1f} KB)")
 
     return {
         "baseline_results": baseline_results,
